@@ -16,8 +16,12 @@ import logging
 from config.settings import LOG_LEVEL
 from src.agent_interface.multi_line_command_handler import MultiLineCommandHandler
 from src.user_input_multi import menu_input_thread
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.llm_agent import LLMFactoryAgent
 import time
+import asyncio
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
@@ -34,9 +38,10 @@ class MultiLineFactorySimulation:
         self.factory: Optional[Factory] = None
         self.mqtt_client: Optional[MQTTClient] = None
         self.command_handler: Optional[MultiLineCommandHandler] = None
+        self.llm_agent: Optional['LLMFactoryAgent'] = None
         self.running = False
 
-    def initialize(self, no_faults=False, no_mqtt=False):
+    def initialize(self, no_faults=False, no_mqtt=False, enable_llm_agent=False):
         """Initialize all simulation components."""
         logger.info("🏭 Initializing Multi-Line Factory Simulation...")
         # 优先使用 CLIENT_ID，其次 USERNAME/USER，最后默认值，确保 client_name 一定为 str
@@ -47,6 +52,21 @@ class MultiLineFactorySimulation:
             or "NLDF_TEST"
         )
         self.mqtt_client = MQTTClient(MQTT_BROKER_HOST, MQTT_BROKER_PORT, client_name)
+        
+        # Initialize LLM Agent if requested
+        if enable_llm_agent:
+            try:
+                from src.llm_agent import LLMFactoryAgent
+                self.llm_agent = LLMFactoryAgent(
+                    mqtt_host=MQTT_BROKER_HOST,
+                    mqtt_port=MQTT_BROKER_PORT,
+                    topic_root=client_name,
+                    decision_interval=5.0
+                )
+                logger.info("🤖 LLM Agent initialized")
+            except ImportError as e:
+                logger.error(f"Failed to import LLM Agent: {e}")
+                self.llm_agent = None
         
         # Connect to MQTT
         logger.info(f"📡 Connecting to MQTT broker at {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}, client_name: {client_name}")
@@ -89,6 +109,32 @@ class MultiLineFactorySimulation:
         logger.info("🚀 Starting Factory Simulation...")
         self.running = True
         
+        # Start LLM Agent if available
+        if self.llm_agent:
+            logger.info("🤖 Starting LLM Agent...")
+            try:
+                # Create a new event loop for the LLM agent
+                import threading
+                def run_llm_agent():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(self.llm_agent.start())
+                    except Exception as e:
+                        logger.error(f"LLM Agent error: {e}")
+                    finally:
+                        loop.close()
+                
+                llm_thread = threading.Thread(target=run_llm_agent, daemon=True)
+                llm_thread.start()
+                
+                # Give LLM agent time to start
+                time.sleep(2)
+                logger.info("🤖 LLM Agent started successfully")
+                
+            except Exception as e:
+                logger.error(f"Failed to start LLM Agent: {e}")
+        
         try:
             if duration:
                 logger.info(f"⏱️  Running simulation for {duration} seconds")
@@ -124,6 +170,15 @@ class MultiLineFactorySimulation:
         logger.info("🧹 Shutting down Factory Simulation...")
         self.running = False
         
+        # Stop LLM Agent if running
+        if self.llm_agent:
+            try:
+                logger.info("🤖 Stopping LLM Agent...")
+                asyncio.run(self.llm_agent.stop())
+                logger.info("🤖 LLM Agent stopped")
+            except Exception as e:
+                logger.error(f"Error stopping LLM Agent: {e}")
+        
         # # Print final scores when shutting down
         # if self.factory:
         #     self.factory.print_final_scores()
@@ -151,10 +206,15 @@ def run_simulation_multi():
         action="store_true",
         help="Disable random fault injection in the simulation."
     )
+    parser.add_argument(
+        "--enable-llm-agent",
+        action="store_true",
+        help="Enable LLM-driven intelligent agent for factory control."
+    )
     args = parser.parse_args()
 
     simulation = MultiLineFactorySimulation()
-    simulation.initialize(no_faults=args.no_fault, no_mqtt=args.no_mqtt)
+    simulation.initialize(no_faults=args.no_fault, no_mqtt=args.no_mqtt, enable_llm_agent=args.enable_llm_agent)
     
     if args.menu and simulation.factory and simulation.factory.topic_manager:
         threading.Thread(target=menu_input_thread, args=(simulation.mqtt_client, simulation.factory, simulation.factory.topic_manager), daemon=True).start()
